@@ -1,0 +1,1180 @@
+﻿-- ================= Core =================
+MangosAdmin_Version = "1.0.0"
+
+-- Namespace
+MangosAdmin = MangosAdmin or {}
+MangosAdmin.UI = MangosAdmin.UI or {}
+
+-- SavedVariables init
+MangosAdminDB = MangosAdminDB or {}
+MangosAdminDB.items     = MangosAdminDB.items     or {}
+MangosAdminDB.spells    = MangosAdminDB.spells    or {}
+MangosAdminDB.quests    = MangosAdminDB.quests    or {}
+MangosAdminDB.teles     = MangosAdminDB.teles     or {}
+MangosAdminDB.itemsets  = MangosAdminDB.itemsets  or {}
+MangosAdminDB.itemsetItems = MangosAdminDB.itemsetItems or {}
+MangosAdminDB.areas     = MangosAdminDB.areas     or {}
+MangosAdminDB.skills    = MangosAdminDB.skills    or {}
+MangosAdminDB.titles    = MangosAdminDB.titles    or {}
+MangosAdminDB.taxinodes = MangosAdminDB.taxinodes or {}
+MangosAdminDB.objects   = MangosAdminDB.objects   or {}
+
+-- State (persistiert)
+MangosAdminDB.state = MangosAdminDB.state or { gm=false, fly=false, visible=true, whispers=true, chat=true }
+local state = MangosAdminDB.state
+
+-- MAQ init
+MangosAdmin.MAQ = MangosAdmin.MAQ or { running=false, cur=nil, queue={}, total=0, done=0, nextAt=0 }
+local MAQ = MangosAdmin.MAQ
+
+-- Hilfsfunktion: Statusanzeige
+local function UpdateStatus()
+  local sf = MangosAdmin.UI and MangosAdmin.UI.StatusFrame
+  local st = MangosAdmin.UI and MangosAdmin.UI.StatusText
+  if not sf or not st then return end
+
+  if MAQ.running then
+    st:SetText("Indexiere "..(MAQ.cur or "?").." ("..(MAQ.done or 0).."/"..(MAQ.total or 0)..")")
+    sf:Show()
+  else
+    sf:Hide()
+  end
+end
+
+-- Enqueue rudimentär (wird von der Lookup-Pipeline genutzt)
+function MangosAdmin.Enqueue(prefix, kind)
+  table.insert(MAQ.queue, { prefix=prefix, kind=kind })
+  MAQ.total = (MAQ.total or 0) + 1
+end
+local Enqueue = MangosAdmin.Enqueue
+
+-- BuildIndex für alle Lookup-Typen
+-- mode = "lookup" (Standard) oder "api"
+function MangosAdmin.BuildIndex(kind, mode)
+  mode = mode or "lookup"
+
+  if MAQ.running and mode == "lookup" then
+    if DEFAULT_CHAT_FRAME then
+      DEFAULT_CHAT_FRAME:AddMessage("|cffffdd55[MA]|r Bereits am Indexieren …")
+    end
+    return
+  end
+
+  -- Tabelle leeren je nach Typ
+  if kind == "item"     then MangosAdminDB.items     = {} end
+  if kind == "spell"    then MangosAdminDB.spells    = {} end
+  if kind == "quest"    then MangosAdminDB.quests    = {} end
+  if kind == "tele"     then MangosAdminDB.teles     = {} end
+  if kind == "itemset"  then MangosAdminDB.itemsets  = {} end
+  if kind == "area"     then MangosAdminDB.areas     = {} end
+  if kind == "skill"    then MangosAdminDB.skills    = {} end
+  if kind == "title"    then MangosAdminDB.titles    = {} end
+  if kind == "taxinode" then MangosAdminDB.taxinodes = {} end
+  if kind == "object"   then MangosAdminDB.objects   = {} end
+
+  -- =========================
+  -- API-Indexierung
+  -- =========================
+  if mode == "api" then
+    if kind == "item" then
+      local consecutiveMisses = 0
+      for id = 1, 100000 do
+        local name = GetItemInfo(id)
+        if name then
+          MangosAdminDB.items[id] = name
+          consecutiveMisses = 0
+        else
+          consecutiveMisses = consecutiveMisses + 1
+          if consecutiveMisses > 500 then break end
+        end
+      end
+
+    elseif kind == "spell" or kind == "skill" then
+      local consecutiveMisses = 0
+      for id = 1, 80000 do
+        local name = GetSpellInfo(id)
+        if name then
+          if kind == "spell" then
+            MangosAdminDB.spells[id] = name
+          else
+            MangosAdminDB.skills[id] = name
+          end
+          consecutiveMisses = 0
+        else
+          consecutiveMisses = consecutiveMisses + 1
+          if consecutiveMisses > 500 then break end
+        end
+      end
+
+    elseif kind == "title" then
+      for id = 1, 500 do
+        local name = GetTitleName and GetTitleName(id)
+        if name then
+          MangosAdminDB.titles[id] = name
+        end
+      end
+
+    else
+      if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff5555[MA]|r API-Indexierung für "..kind.." nicht verfügbar, nutze Lookup.")
+      end
+      return MangosAdmin.BuildIndex(kind, "lookup")
+    end
+
+    if DEFAULT_CHAT_FRAME then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r API-Indexierung abgeschlossen: "..kind)
+    end
+    return
+  end
+
+  -- =========================
+  -- Lookup-Indexierung (Standard)
+  -- =========================
+  MAQ.running = true
+  MAQ.cur = kind
+  MAQ.queue = {}
+  MAQ.total, MAQ.done = 0, 0
+
+  -- Alphabet + Zahlen indexieren
+  for c = string.byte("a"), string.byte("z") do Enqueue(string.char(c), kind) end
+  for d = 0,9 do Enqueue(tostring(d), kind) end
+
+  if DEFAULT_CHAT_FRAME then
+    DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Starte Lookup-Indexierung: "..kind)
+  end
+  MAQ.nextAt = 0
+  UpdateStatus()
+end
+
+function MangosAdmin.BuildItemsetIndexAuto()
+  -- Tooltip einmalig initialisieren
+  if not MA_ScanTip then
+    MA_ScanTip = CreateFrame("GameTooltip", "MangosAdmin_ScanTip", UIParent, "GameTooltipTemplate")
+    MA_ScanTip:SetOwner(UIParent, "ANCHOR_NONE")
+  end
+
+  -- Lokale Parser
+  local function ScanTipLine(i)
+    local fs = _G["MangosAdmin_ScanTipTextLeft"..i]
+    return fs and fs:GetText() or nil
+  end
+
+  local function ScanParseSetHeader(text)
+    if not text or text == "" then return nil end
+    local setName = text:match("^(.+)%s*%(%d+/%d+%)$")
+    if setName then
+      return setName:gsub("%s+$","")
+    end
+    return nil
+  end
+
+  local function ScanParseSetItemNames(startLine, maxLines)
+    local names = {}
+    for i = startLine, maxLines do
+      local t = ScanTipLine(i)
+      if not t or t == "" then break end
+      if t:match("^%(%d+%)%s+Set:") then break end -- ab hier Set-Boni
+      if not t:match("^%(") then
+        table.insert(names, t:gsub("%s+$",""))
+      end
+    end
+    return names
+  end
+
+  -- Reverse-Maps bauen
+  local nameToItemId = {}
+  for id, nm in pairs(MangosAdminDB.items or {}) do
+    if nm and id then nameToItemId[nm] = id end
+  end
+
+  local setNameToId = {}
+  for sid, sname in pairs(MangosAdminDB.itemsets or {}) do
+    if sname and sid then setNameToId[sname] = sid end
+  end
+
+  if not next(nameToItemId) or not next(setNameToId) then
+    return
+  end
+
+  local setsCollected = {}
+  local seenItemInSet = {}
+
+  -- Alle bekannten Items scannen
+  for itemId, _ in pairs(MangosAdminDB.items) do
+    MA_ScanTip:ClearLines()
+    local ok = pcall(function() MA_ScanTip:SetHyperlink("item:"..itemId) end)
+    if ok then
+      local lines = MA_ScanTip:NumLines() or 0
+      local headerLine, setName
+      for i = 1, lines do
+        local t = ScanTipLine(i)
+        local maybe = ScanParseSetHeader(t)
+        if maybe then
+          headerLine = i
+          setName = maybe
+          break
+        end
+      end
+
+      if setName then
+        local setId = setNameToId[setName]
+        if setId then
+          local names = ScanParseSetItemNames((headerLine or 1) + 1, lines)
+          if names and #names > 0 then
+            setsCollected[setId] = setsCollected[setId] or {}
+            seenItemInSet[setId] = seenItemInSet[setId] or {}
+
+            for _, nm in ipairs(names) do
+              local id = nameToItemId[nm]
+              if id and not seenItemInSet[setId][id] then
+                -- optional: Info vorladen
+                local _ = GetItemInfo(id) or (pcall(function() MA_ScanTip:SetHyperlink("item:"..id) end))
+                table.insert(setsCollected[setId], id)
+                seenItemInSet[setId][id] = true
+              end
+            end
+
+            -- Debug-Ausgabe
+            DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Set '"..setName.."' -> "..#setsCollected[setId].." Items erkannt")
+          end
+        end
+      end
+    end
+  end
+
+  -- Ergebnisse in DB schreiben
+  for sid, list in pairs(setsCollected) do
+    MangosAdminDB.itemsetItems[sid] = list
+  end
+end
+
+
+
+-- GM-Befehle senden
+function SendGM(cmd)
+  if cmd and cmd ~= "" then
+    local tag = string.match(cmd, "^%.lookup%s+([%a_%-]+)")
+    if tag and (
+      tag == "item" or tag == "spell" or tag == "quest" or tag == "tele" or
+      tag == "itemset" or tag == "area" or tag == "skill" or tag == "title" or
+      tag == "taxinode" or tag == "object"
+    ) then
+      MangosAdmin.LastLookup = MangosAdmin.LastLookup or {}
+      MangosAdmin.LastLookup.tag = tag
+      MangosAdmin.LastLookup.expiry = GetTime() + 5
+    end
+
+    local channel = MangosAdmin.ChatChannel or "SAY"
+    SendChatMessage(cmd, channel)
+    if DEFAULT_CHAT_FRAME then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r "..cmd)
+    end
+  else
+    if DEFAULT_CHAT_FRAME then
+      DEFAULT_CHAT_FRAME:AddMessage("|cffff5555[MA]|r Ungültiger/Leerer Befehl")
+    end
+  end
+end
+MangosAdmin.SendGM = SendGM
+
+-- States für Toggles (persistiert über state)
+function MangosAdmin.ExecRaw(text) SendGM(text) end
+
+local function RefreshStatusLabel()
+  if MangosAdmin.UI.StatusLabel then
+    MangosAdmin.UI.StatusLabel:SetText(
+      string.format("GM: %s | Fly: %s | Visible: %s | Whispers: %s | Chat: %s",
+        state.gm and "ON" or "OFF",
+        state.fly and "ON" or "OFF",
+        state.visible and "ON" or "OFF",
+		state.whispers and "ON" or "OFF",
+		state.gmchat and "ON" or "OFF")
+	)
+  end
+end
+
+function MangosAdmin.ToggleGM()
+	SendGM(state.gm and ".gm off" or ".gm on")
+	state.gm = not state.gm
+	RefreshStatusLabel()
+end
+function MangosAdmin.ToggleFly()
+	SendGM(state.fly and ".gm fly off" or ".gm fly on")
+	state.fly = not state.fly
+	RefreshStatusLabel()
+end
+function MangosAdmin.ToggleVisible()
+	SendGM(state.visible and ".gm visible off" or ".gm visible on")
+	state.visible = not state.visible
+	RefreshStatusLabel()
+end
+function MangosAdmin.ToggleWhispers()
+	SendGM(state.whispers and ".whispers on" or ".whispers off")
+	state.whispers = not state.whispers
+	RefreshStatusLabel()
+end
+function MangosAdmin.ToggleGMChat()
+	SendGM(state.gmchat and ".gm chat on" or ".gm chat off")
+	state.gmchat = not state.gmchat
+	RefreshStatusLabel()
+end
+
+-- Registry (Kategorien und Commands)
+MangosAdmin.Registry = {
+    {
+        category = "GM",
+        commands = {
+            { 
+				type="toggle", 
+				label="GM On/Off", 
+				toggle=function() 
+					MangosAdmin.ToggleGM() 
+				end 
+			},
+            { 
+				type="toggle", 
+				label="GM Visible On/Off", 
+				toggle=function() 
+					MangosAdmin.ToggleVisible() 
+				end 
+			},
+            { 
+				type="toggle", 
+				label="GM Fly On/Off", 
+				toggle=function() 
+					MangosAdmin.ToggleFly() 
+				end 
+			},
+			{ 
+				type="toggle", 
+				label="GM Chat On/Off", 
+				toggle=function() 
+					MangosAdmin.ToggleGMChat() 
+				end 
+			},
+			{ 
+				type="toggle", 
+				label="Whispers On/Off", 
+				toggle=function() 
+					MangosAdmin.ToggleWhispers() 
+				end 
+			},
+			
+            { 
+				type="button", 
+				label="Save", 
+				build=function() 
+					return ".save" 
+				end 
+			},
+            { 
+				type="button", 
+				label="Saveall", 
+				build=function() 
+					return ".saveall" 
+				end 
+			},
+            { 
+				type="button", 
+				label="Server Info", 
+				build=function() 
+					return ".server info" 
+				end 
+			},
+        }
+    },
+
+    {
+        category = "Movement",
+        commands = {
+            { 
+				type="input", 
+				label="Modify Speed", 
+				inputs={{key="rate",label="Rate",width=80}}, 
+				build=function(a) local r=tonumber(a.rate) 
+					if r then 
+						return ".modify speed "..r 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Modify Fly", 
+				inputs={{key="rate",label="Rate",width=80}}, 
+				build=function(a) 
+					local r=tonumber(a.rate) 
+					if r then 
+						return ".modify fly "..r 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Modify Swim", 
+				inputs={{key="rate",label="Rate",width=80}}, 
+				build=function(a) 
+					local r=tonumber(a.rate) 
+					if r then 
+						return ".modify swim "..r 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Modify Aspeed", 
+				inputs={{key="rate",label="Rate",width=80}}, 
+				build=function(a) 
+					local r=tonumber(a.rate) 
+					if r then 
+						return ".modify aspeed "..r 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Modify Bwalk", 
+				inputs={{key="rate",label="Rate",width=80}}, 
+				build=function(a) 
+					local r=tonumber(a.rate) 
+					if r then 
+						return ".modify bwalk "..r 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Modify Scale", 
+				inputs={{key="v",label="Scale",width=80}}, 
+				build=function(a) 
+					local r=tonumber(a.v) 
+					if r then 
+						return ".modify scale "..r 
+					end 
+				end 
+			},
+            { 
+				type="button", 
+				label="Dismount", 
+				build=function() 
+					return ".dismount" 
+				end 
+			},
+            { 
+				type="button", 
+				label="Recall (target optional)", 
+				build=function() 
+					return ".recall" 
+				end 
+			},
+        }
+    },
+
+    {
+        category = "Teleport",
+        commands = {
+            {
+                type = "select",
+                label = "Teleport",
+                optionsFunc = function() return MangosAdmin.GetTeleOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".tele "..a.value
+                    end
+                end
+            },
+            {
+                type="input",
+                label="Go XYZ",
+                inputs={
+                    {key="x",label="X",width=80},
+                    {key="y",label="Y",width=80},
+                    {key="z",label="Z",width=80},
+                    {key="map",label="Map",width=60}
+                },
+                build=function(a)
+                    local x = tonumber(a.x); local y = tonumber(a.y); local z = tonumber(a.z); local map = tonumber(a.map)
+                    if x and y and z then
+                        if map then
+                            return ".go xyz "..x.." "..y.." "..z.." "..map
+                        end
+                        return ".go xyz "..x.." "..y.." "..z
+                    end
+                end
+            },
+            { 
+			type="input", 
+			label="Go Creature by id", 
+			inputs={{key="id",label="CreatureId",width=100}}, 
+			build=function(a) 
+				local id=tonumber(a.id) 
+					if id then 
+						return ".go creature id "..id 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Go Object by id", 
+				inputs={{key="id",label="GameObjectId",width=100}}, 
+				build=function(a) 
+					local id=tonumber(a.id) 
+					if id then 
+						return ".go object id "..id 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Go Graveyard", 
+				inputs={{key="id",label="GY Id",width=80}}, 
+				build=function(a) 
+					local id=tonumber(a.id) 
+					if id then 
+						return ".go graveyard "..id 
+					end 
+				end 
+			},
+			
+            { 
+				type="button", 
+				label="GPS (self/target)", 
+				build=function() 
+					return ".gps" 
+				end 
+			},
+        }
+    },
+
+    {
+        category = "Player",
+        commands = {
+            { type="input", label="Kick", inputs={{key="name",label="Name",width=140}}, build=function(a) if a.name and a.name~="" then return ".kick "..a.name end end },
+            { type="input", label="Mute", inputs={{key="name",label="Name",width=140},{key="min",label="Min",width=60}}, build=function(a) if a.name and a.name~="" and tonumber(a.min) then return ".mute "..a.name.." "..a.min end end },
+            { type="input", label="Unmute", inputs={{key="name",label="Name",width=140}}, build=function(a) if a.name and a.name~="" then return ".unmute "..a.name end end },
+            { type="input", label="Ban Account", inputs={{key="name",label="Name",width=120},{key="time",label="Zeit",width=80},{key="reason",label="Grund",width=160}}, build=function(a) if a.name and a.name~="" and a.time and a.time~="" and a.reason and a.reason~="" then return ".ban account "..a.name.." "..a.time.." "..a.reason end end },
+            { type="input", label="Ban Character", inputs={{key="name",label="Name",width=120},{key="time",label="Zeit",width=80},{key="reason",label="Grund",width=160}}, build=function(a) if a.name and a.name~="" and a.time and a.time~="" and a.reason and a.reason~="" then return ".ban character "..a.name.." "..a.time.." "..a.reason end end },
+            { type="input", label="Unban Account", inputs={{key="name",label="Name",width=140}}, build=function(a) if a.name and a.name~="" then return ".unban account "..a.name end end },
+            { type="input", label="Unban Character", inputs={{key="name",label="Name",width=140}}, build=function(a) if a.name and a.name~="" then return ".unban character "..a.name end end },
+            { type="input", label="PInfo", inputs={{key="name",label="Name",width=140}}, build=function(a) if a.name and a.name~="" then return ".pinfo "..a.name end end },
+        }
+    },
+
+    {
+        category = "Spells & Auras",
+        commands = {
+            {
+                type = "select",
+                label = "Cast Self",
+                optionsFunc = function() return MangosAdmin.GetSpellOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".cast self "..a.value
+                    end
+                end
+            },
+            {
+                type = "select",
+                label = "Cast Target",
+                optionsFunc = function() return MangosAdmin.GetSpellOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".cast target "..a.value
+                    end
+                end
+            },
+			{
+                type = "select",
+                label = "Learn Spell",
+                optionsFunc = function() return MangosAdmin.GetSpellOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".learn "..a.value
+                    end
+                end
+            },
+			{
+                type = "select",
+                label = "Unlearn Spell",
+                optionsFunc = function() return MangosAdmin.GetSpellOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".unlearn "..a.value
+                    end
+                end
+            },
+			
+            { type="input", label="Aura",          inputs={{key="id",label="SpellId",width=100}}, build=function(a) local id=tonumber(a.id) if id then return ".aura "..id end end },
+            { type="input", label="Unaura",        inputs={{key="id",label="SpellId",width=100}}, build=function(a) local id=tonumber(a.id) if id then return ".unaura "..id end end },
+            { type="input", label="Cooldown",      inputs={{key="id",label="SpellId",width=100}}, build=function(a) local id=tonumber(a.id) if id then return ".cooldown "..id end end },
+        }
+    },
+
+    {
+        category = "HP/Mana/Stats",
+        commands = {
+            { type="input", label="Modify HP",    inputs={{key="v",label="HP",width=100}},    build=function(a) local v=tonumber(a.v) if v then return ".modify hp "..v end end },
+            { type="input", label="Modify Mana",  inputs={{key="v",label="Mana",width=100}},  build=function(a) local v=tonumber(a.v) if v then return ".modify mana "..v end end },
+            { type="input", label="Modify Rage",  inputs={{key="v",label="Rage",width=100}},  build=function(a) local v=tonumber(a.v) if v then return ".modify rage "..v end end },
+            { type="input", label="Modify Energy",inputs={{key="v",label="Energy",width=100}},build=function(a) local v=tonumber(a.v) if v then return ".modify energy "..v end end },
+            { type="input", label="Modify TP",    inputs={{key="v",label="TP",width=100}},    build=function(a) local v=tonumber(a.v) if v then return ".modify tp "..v end end },
+            { type="input", label="Modify Scale", inputs={{key="v",label="Scale",width=100}}, build=function(a) local v=tonumber(a.v) if v then return ".modify scale "..v end end },
+        }
+    },
+
+    {
+        category = "Items",
+        commands = {
+            {
+                type = "select",
+                label = "AddItem",
+                optionsFunc = function() return MangosAdmin.GetItemOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".additem "..a.value.." 1"
+                    end
+                end
+            },
+			{
+                type = "select",
+                label = "AddItemset",
+                optionsFunc = function() return MangosAdmin.GetItemsetOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".additemset "..a.value.." 1"
+                    end
+                end
+            },
+			
+            { type="input", label="Modify Money (Kupfer)", inputs={{key="m",label="Kupfer",width=120}}, build=function(a) local m=tonumber(a.m) if m then return ".modify money "..m end end },
+            { type="button", label="Repair Items", build=function() return ".repairitems" end },
+        }
+    },
+
+    {
+        category = "NPC",
+        commands = {
+            { type="input", label="NPC Add",    inputs={{key="id",label="CreatureId",width=120}}, build=function(a) local id=tonumber(a.id) if id then return ".npc add "..id end end },
+            { type="input", label="NPC Delete", inputs={{key="guid",label="Guid",width=120}},      build=function(a) local g=tonumber(a.guid) if g then return ".npc delete "..g end end },
+            { type="button", label="NPC Info (selected)", build=function() return ".npc info" end },
+        }
+    },
+	
+	{
+		category = "Objects",
+		commands = {
+			{ type="input", label="GO Add",     inputs={{key="id",label="GO Id",width=120}},       build=function(a) local id=tonumber(a.id) if id then return ".gobject add "..id end end },
+            { type="input", label="GO Delete",  inputs={{key="guid",label="Guid",width=120}},      build=function(a) local g=tonumber(a.guid) if g then return ".gobject delete "..g end end },
+            { type="input", label="GO Near",    inputs={{key="d",label="Dist",width=80}},          build=function(a) local d=tonumber(a.d) if d then return ".gobject near "..d end end },
+		}
+	},
+
+    {
+        category = "Quests",
+        commands = {
+            {
+                type = "select",
+                label = "Quest Add",
+                optionsFunc = function() return MangosAdmin.GetQuestOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".quest add "..a.value
+                    end
+                end
+            },
+            {
+                type = "select",
+                label = "Quest Complete",
+                optionsFunc = function() return MangosAdmin.GetQuestOptions() end,
+                build = function(a)
+                    if a and a.value then
+                        return ".quest complete "..a.value
+                    end
+                end
+            },
+            { type="input", label="Quest Remove",   inputs={{key="id",label="QuestId",width=120}}, build=function(a) local id=tonumber(a.id) if id then return ".quest remove "..id end end },
+        }
+    },
+	
+	{
+		category = "Server",
+		commands = {
+		    { type="button", label="Reload All",         build=function() return ".reload all" end },
+            { type="button", label="Reload Config",      build=function() return ".reload config" end },
+            { type="button", label="Respawn",            build=function() return ".respawn" end },
+            { type="button", label="Revive",             build=function() return ".revive" end },
+            { type="button", label="Server Shutdown 60s",build=function() return ".server shutdown 60" end },
+            { type="button", label="Server Shutdown cancel", build=function() return ".server shutdown cancel" end },
+            { type="button", label="Server Restart 60s", build=function() return ".server restart 60" end },
+            { type="button", label="Server Restart cancel", build=function() return ".server restart cancel" end },	
+		}
+	},
+	
+	{
+		category = "Titles",
+		commands = {
+			{
+				type = "select",
+				label = "Add title",
+				optionsFunc = function() return MangosAdmin.GetTitleOptions() end,
+				build = function(a)
+					if a and a.value then
+						return ".title add "..a.value
+					end
+				end
+			},
+			{
+				type = "select",
+				label = "Remove title",
+				optionsFunc = function() return MangosAdmin.GetTitleOptions() end,
+				build = function(a)
+					if a and a.value then
+						return ".title remove "..a.value
+					end
+				end
+			},
+		}
+	},
+	
+    {
+        category = "Tickets & Notify",
+        commands = {
+            { 
+				type="button", 
+				label="Ticket On", 
+				build=function() 
+					return ".ticket on" 
+				end 	
+			},
+            { 
+				type="button", 
+				label="Ticket Off", 
+				build=function() 
+					return ".ticket off" 
+				end 
+			},
+            { 
+				type="input", 
+				label="Ticket Respond", 
+				inputs={{key="n",label="#Num",width=80},{key="msg",label="Text",width=260}}, 
+				build=function(a) 
+					if tonumber(a.n) and a.msg and a.msg~="" then 
+						return ".ticket respond "..a.n.." "..a.msg 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Announce", 
+				inputs={{key="m",label="Text",width=300}}, 
+				build=function(a) 
+					if a.m and a.m~="" then 
+						return ".announce "..a.m 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Notify",   
+				inputs={{key="m",label="Text",width=300}}, 
+				build=function(a) 
+					if a.m and a.m~="" then 
+						return ".notify "..a.m 
+					end 
+				end 
+			},
+        }
+    },
+
+    {
+        category = "Lookup",
+        commands = {
+            { 
+				type="input", 
+				label="Lookup Item",     
+				inputs={{key="n",label="Name",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup item "..a.n 
+					end 
+				end 
+			},
+			{ 
+				type="input", 
+				label="Lookup Itemset",     
+				inputs={{key="n",label="Name",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup itemset "..a.n 
+					end 
+				end 
+			},
+			
+			{ 
+				type="input", 
+				label="Lookup Skill",    
+				inputs={{key="n",label="Name",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup skill "..a.n 
+					end 
+				end 
+			},
+            { 
+				type="input", 
+				label="Lookup Spell",    
+				inputs={{key="n",label="Name",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup spell "..a.n 
+					end 
+				end 
+			},
+			
+            { 
+				type="input", 
+				label="Lookup Creature", 
+				inputs={{key="n",label="Name",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup creature "..a.n 
+					end 
+				end 
+			},
+			{ 
+				type="input", 
+				label="Lookup Object", 
+				inputs={{key="n",label="Name",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup object "..a.n 
+					end 
+				end 
+			},
+			
+            { 
+				type="input", 
+				label="Lookup Tele",     
+				inputs={{key="n",label="Teilstring",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup tele "..a.n 
+					end 
+				end 
+			},
+			{ 
+				type="input", 
+				label="Lookup Area",     
+				inputs={{key="n",label="Teilstring",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup area "..a.n 
+					end 
+				end 
+			},
+			{ 
+				type="input", 
+				label="Lookup Taxinodes",     
+				inputs={{key="n",label="Teilstring",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup taxinode "..a.n 
+					end 
+				end 
+			},
+			
+			{ 
+				type="input", 
+				label="Lookup Quest",     
+				inputs={{key="n",label="Teilstring",width=220}}, 
+				build=function(a) 
+					if a.n and a.n~="" then 
+						return ".lookup quest "..a.n 
+					end 
+				end 
+			},
+        }
+    },
+
+    {
+        category = "Index API",
+        commands = {
+            { 
+				type="button", 
+				label="Build Spells Index", 
+				toggle=function() 
+					MangosAdmin.BuildIndex("spell", "api"); 
+					return nil 
+				end 
+			},
+			{ 
+				type="button", 
+				label="Build Skills Index", 
+				toggle=function() 
+					MangosAdmin.BuildIndex("skill", "api"); 
+					return nil 
+				end 
+			},
+            { 
+				type="button", 
+				label="Build Items Index",  
+				toggle=function() 
+					MangosAdmin.BuildIndex("item", "api");  
+					return nil 
+				end 
+			},
+			{ 
+				type="button", 
+				label="Build Title Index",  
+				toggle=function() 
+					MangosAdmin.BuildIndex("title", "api");  
+					return nil 
+				end 
+			},
+            { 
+				type="button", 
+				label="Build ALL Indexes", 
+				toggle=function()
+                local order = { "spell", "item", "skill", "title" }
+                local i = 1
+                local f = CreateFrame("Frame")
+                local function runNext()
+                    if i > #order then
+                        if DEFAULT_CHAT_FRAME then
+                            DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Alle API-Indexierungen abgeschlossen.")
+                        end
+                        f:SetScript("OnUpdate", nil)
+                        return
+                    end
+                    local kind = order[i]
+                    i = i + 1
+                    MangosAdmin.BuildIndex(kind, "api")
+                end
+                f:SetScript("OnUpdate", function()
+                    if not MAQ.running then
+                        runNext()
+                    end
+                end)
+                runNext()
+                return nil
+            end 
+			},
+        }
+    },
+	
+	{
+		category = "Index Lookup",
+		commands = {
+            { 
+				type="button", 
+				label="Build Spells Index", 
+				build=function() 
+					MangosAdmin.BuildIndex("spell", "lookup"); 
+					return nil 
+				end 
+			},
+			{ 
+				type="button", 
+				label="Build Skills Index", 
+				build=function() 
+					MangosAdmin.BuildIndex("skill", "lookup"); 
+					return nil 
+				end 
+			},
+            { 
+				type="button", 
+				label="Build Items Index",  
+				build=function() 
+					MangosAdmin.BuildIndex("item", "lookup");  
+					return nil 
+				end 
+			},
+			{ 
+				type="button", 
+				label="Build Item-Sets Index",  
+				build=function() 
+					MangosAdmin.BuildIndex("itemset", "lookup");  
+					return nil 
+				end 
+			},
+            { 
+				type="button", 
+				label="Build Quests Index", 
+				build=function() 
+					MangosAdmin.BuildIndex("quest", "lookup"); 
+					return nil 
+				end 
+			},
+            { 
+				type="button", 
+				label="Build Tele Index",   
+				build=function() 
+					MangosAdmin.BuildIndex("tele", "lookup");  
+					return nil 
+				end 
+			},
+			{ 
+				type="button", 
+				label="Build Area Index",   
+				build=function() 
+					MangosAdmin.BuildIndex("area", "lookup");  
+					return nil 
+				end 
+			},
+            { 
+				type="button", 
+				label="Build ALL Indexes", 
+				build=function()
+                local order = { "spell", "item", "quest", "tele" }
+                local i = 1
+                local f = CreateFrame("Frame")
+                local function runNext()
+                    if i > #order then
+                        if DEFAULT_CHAT_FRAME then
+                            DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Alle Indexierungen abgeschlossen.")
+                        end
+                        f:SetScript("OnUpdate", nil)
+                        return
+                    end
+                    local kind = order[i]
+                    i = i + 1
+                    MangosAdmin.BuildIndex(kind, "lookup")
+                end
+                f:SetScript("OnUpdate", function()
+                    if not MAQ.running then
+                        runNext()
+                    end
+                end)
+                runNext()
+                return nil
+            end 
+			},
+		}
+	},
+	
+	{
+	  category = "Reset Index",
+	  commands = {
+		{
+		  type="button",
+		  label="Reset Items",
+		  toggle=function()
+			MangosAdminDB.items = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Items-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Spells",
+		  toggle=function()
+			MangosAdminDB.spells = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Spells-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Quests",
+		  toggle=function()
+			MangosAdminDB.quests = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Quests-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Teleports",
+		  toggle=function()
+			MangosAdminDB.teles = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Teleports-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Itemsets",
+		  toggle=function()
+			MangosAdminDB.itemsets = {}
+			MangosAdminDB.itemsetItems = {}  -- ebenfalls leeren
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Itemsets-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Skills",
+		  toggle=function()
+			MangosAdminDB.skills = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Skills-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Titles",
+		  toggle=function()
+			MangosAdminDB.titles = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Titles-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Areas",
+		  toggle=function()
+			MangosAdminDB.areas = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Areas-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Taxinodes",
+		  toggle=function()
+			MangosAdminDB.taxinodes = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Taxinodes-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset Objects",
+		  toggle=function()
+			MangosAdminDB.objects = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Objects-Index zurückgesetzt.")
+			end
+		  end
+		},
+		{
+		  type="button",
+		  label="Reset ALL Indexes",
+		  toggle=function()
+			MangosAdminDB.items     = {}
+			MangosAdminDB.spells    = {}
+			MangosAdminDB.quests    = {}
+			MangosAdminDB.teles     = {}
+			MangosAdminDB.itemsets  = {}
+			MangosAdminDB.itemsetItems = {}  -- ebenfalls leeren
+			MangosAdminDB.skills    = {}
+			MangosAdminDB.titles    = {}
+			MangosAdminDB.areas     = {}
+			MangosAdminDB.taxinodes = {}
+			MangosAdminDB.objects   = {}
+			if DEFAULT_CHAT_FRAME then
+			  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55[MA]|r Alle Indexe zurückgesetzt.")
+			end
+		  end
+		},
+	  }
+	},
+}

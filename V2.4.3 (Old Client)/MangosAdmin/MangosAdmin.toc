@@ -1,0 +1,19 @@
+## Interface: 20400
+## Title: MangosAdmin
+## Notes: This addon helps GMs/Devs/Admins to manage their Private-Server's
+## Author: Justin Kaufmann
+## Version: 1.0.0
+## SavedVariables: MangosAdminDB
+
+Core.lua
+CoreLookup.lua
+CoreItems.lua
+CoreSlash.lua
+
+GuiHelpers.lua
+GuiScrollFrame.lua
+GuiDropdown.lua
+GuiStatus.lua
+GuiCategories.lua
+GuiMainFrame.lua
+GuiMinimapButton.lua

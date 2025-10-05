@@ -1,0 +1,70 @@
+﻿-- ========= GuiScrollFrame.lua =========
+MangosAdmin = MangosAdmin or {}
+MangosAdmin.UI = MangosAdmin.UI or {}
+
+function MangosAdmin.CreateScrollArea(panel, innerPadding)
+  innerPadding = innerPadding or 10
+
+  local function recalcSize()
+    local w = panel:GetWidth() - innerPadding*2 - 18
+    local h = panel:GetHeight() - innerPadding*2
+    return w, h
+  end
+
+  local scrollWidth, scrollHeight = recalcSize()
+
+  local scroll = CreateFrame("ScrollFrame", "MangosAdmin_SF", panel)
+  scroll:SetWidth(scrollWidth); scroll:SetHeight(scrollHeight)
+  scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", innerPadding, -innerPadding)
+
+  local content = CreateFrame("Frame", "MangosAdmin_Content", scroll)
+  content:SetWidth(scrollWidth); content:SetHeight(scrollHeight)
+  scroll:SetScrollChild(content)
+
+  local scrollbar = CreateFrame("Slider", "MangosAdmin_ScrollBar", panel, "OptionsSliderTemplate")
+  scrollbar:SetWidth(16); scrollbar:SetHeight(scrollHeight)
+  scrollbar:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -10, -10)
+  scrollbar:SetMinMaxValues(0, 0)
+  scrollbar:SetValueStep(10)
+  _G[scrollbar:GetName().."Low"]:SetText("")
+  _G[scrollbar:GetName().."High"]:SetText("")
+  _G[scrollbar:GetName().."Text"]:SetText("")
+  scrollbar:SetScript("OnValueChanged", function(self, val)
+    if scroll then
+      scroll:SetVerticalScroll(val)
+    end
+  end)
+
+  scroll:EnableMouseWheel(true)
+  scroll:SetScript("OnMouseWheel", function(self, delta)
+    if not scrollbar then return end
+    local cur = scrollbar:GetValue()
+    local min, max = scrollbar:GetMinMaxValues()
+    local step = MangosAdmin.UI.scrollStep or 30
+    cur = cur - delta*step
+    if cur < min then cur = min end
+    if cur > max then cur = max end
+    scrollbar:SetValue(cur)
+  end)
+
+  -- Dynamische Anpassung bei GrÃ¶ÃŸenÃ¤nderung
+  panel:SetScript("OnSizeChanged", function()
+    local w, h = recalcSize()
+    scroll:SetWidth(w); scroll:SetHeight(h)
+    content:SetWidth(w); content:SetHeight(h)
+    scrollbar:SetHeight(h)
+    MangosAdmin.UI.scrollWidth = w
+    MangosAdmin.UI.scrollHeight = h
+  end)
+
+  -- Speichere im UI-Status
+  MangosAdmin.UI.scroll = scroll
+  MangosAdmin.UI.content = content
+  MangosAdmin.UI.currentContent = content
+  MangosAdmin.UI.scrollbar = scrollbar
+  MangosAdmin.UI.scrollWidth = scrollWidth
+  MangosAdmin.UI.scrollHeight = scrollHeight
+  MangosAdmin.UI.scrollStep = 30  -- Standard-Scrollschritt
+
+  return scroll, content, scrollbar
+end

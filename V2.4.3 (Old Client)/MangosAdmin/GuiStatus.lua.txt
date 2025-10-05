@@ -1,0 +1,14 @@
+﻿-- ========= GuiStatus.lua =========
+MangosAdmin = MangosAdmin or {}
+MangosAdmin.UI = MangosAdmin.UI or {}
+
+function MangosAdmin.CreateStatusLabel(parent, offsetY)
+  offsetY = offsetY or -34
+  local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  label:SetPoint("TOP", parent, "TOP", 0, offsetY)
+  label:SetText("Status: GM=AUS, Fly=AUS, Visible=AN")
+
+  -- Im Namespace speichern
+  MangosAdmin.UI.StatusLabel = label
+  return label
+end

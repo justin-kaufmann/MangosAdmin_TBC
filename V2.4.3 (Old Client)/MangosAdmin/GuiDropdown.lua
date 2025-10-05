@@ -1,0 +1,298 @@
+-- ========= GuiDropdown.lua =========
+local MA_DROPDOWN_ID = 0
+
+function CreateSimpleDropdown(parent, left, top, width, options, onChange)
+  MA_DROPDOWN_ID = MA_DROPDOWN_ID + 1
+
+  local ddName   = "MangosAdmin_Dropdown"..MA_DROPDOWN_ID
+  local listName = "MangosAdmin_DDList"..MA_DROPDOWN_ID
+  local fsName   = "MangosAdmin_DDFaux"..MA_DROPDOWN_ID
+
+  local dd = CreateFrame("Button", ddName, parent, "UIPanelButtonTemplate")
+  dd:SetWidth(width)
+  dd:SetHeight(22)
+  dd:SetPoint("TOPLEFT", parent, "TOPLEFT", left, top)
+  dd:SetText("Auswahl")
+
+  local opts = options or {}
+  local selectedValue, selectedText
+
+  local list = CreateFrame("Frame", listName, UIParent)
+  list:SetFrameStrata("TOOLTIP")
+  list:SetFrameLevel((parent:GetFrameLevel() or 1) + 50)
+  list:SetBackdrop({
+    bgFile="Interface\\ChatFrame\\ChatFrameBackground",
+    edgeFile="Interface\\Tooltips\\UI-Tooltip-Border",
+    tile=true, tileSize=16, edgeSize=16,
+    insets={left=4,right=4,top=4,bottom=4}
+  })
+  list:SetBackdropColor(0,0,0,0.95)
+  list:SetPoint("TOPLEFT", dd, "BOTTOMLEFT", 0, -2)
+  list:SetWidth(width + 40)
+  list:SetHeight(260)
+  list:Hide()
+
+  local searchBox = CreateFrame("EditBox", listName.."_Search", list, "InputBoxTemplate")
+  searchBox:SetWidth(width)
+  searchBox:SetHeight(20)
+  searchBox:SetPoint("TOPLEFT", list, "TOPLEFT", 6, -6)
+  searchBox:SetAutoFocus(false)
+
+  local scrollFrame = CreateFrame("ScrollFrame", fsName, list, "FauxScrollFrameTemplate")
+  scrollFrame:SetPoint("TOPLEFT", searchBox, "BOTTOMLEFT", 0, -6)
+  scrollFrame:SetPoint("BOTTOMRIGHT", list, "BOTTOMRIGHT", -26, 6)
+
+  local scrollBar = _G[fsName.."ScrollBar"]
+  local scrollUpBtn = _G[scrollBar:GetName().."ScrollUpButton"]
+  local scrollDownBtn = _G[scrollBar:GetName().."ScrollDownButton"]
+
+  local VISIBLE_ROWS = 12
+  local ROW_HEIGHT   = 18
+
+  scrollFrame.buttonHeight = ROW_HEIGHT
+  _G[fsName.."ButtonHeight"] = ROW_HEIGHT
+
+  local buttons = {}
+  local filtered = {}
+
+  for i = 1, VISIBLE_ROWS do
+    local b = CreateFrame("Button", listName.."_Row"..i, list)
+    b:SetHeight(ROW_HEIGHT)
+    b:SetPoint("TOPLEFT", scrollFrame, "TOPLEFT", 2, -(i-1)*ROW_HEIGHT)
+    b:SetPoint("TOPRIGHT", scrollFrame, "TOPRIGHT", -2, -(i-1)*ROW_HEIGHT)
+
+    local fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    fs:SetAllPoints(b)
+    fs:SetJustifyH("LEFT")
+    b.text = fs
+
+    b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+    b:GetHighlightTexture():SetBlendMode("ADD")
+
+    buttons[i] = b
+  end
+
+  local function RefreshButtons()
+    local offset = FauxScrollFrame_GetOffset(scrollFrame) or 0
+    for i = 1, VISIBLE_ROWS do
+      local index = offset + i
+      local opt = filtered[index]
+      local b = buttons[i]
+
+      if opt then
+        b:Show()
+        b.opt = opt
+        local label = opt.text or ""
+
+        if opt.kind == "category" then
+          b.text:SetText("|cffffff00"..label.."|r")
+          b:Disable()
+          b:SetScript("OnEnter", nil); b:SetScript("OnLeave", nil); b:SetScript("OnClick", nil)
+
+        elseif opt.kind == "sub" then
+          b.text:SetText("  + "..label)
+          b:Disable()
+          b:SetScript("OnEnter", nil); b:SetScript("OnLeave", nil); b:SetScript("OnClick", nil)
+
+        else
+          b.text:SetText("    - "..label)
+          b:Enable()
+
+			b:SetScript("OnEnter", function(self)
+			  local o = self.opt
+			  if not o or not o.value then return end
+
+			  GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+
+			  if o.kind == "item" then
+				GameTooltip:SetHyperlink("item:"..o.value)
+
+				elseif o.kind == "spell" then
+				  if GameTooltip.SetSpellByID then
+					GameTooltip:SetSpellByID(o.value)
+				  else
+					local name = GetSpellInfo and GetSpellInfo(o.value)
+					GameTooltip:SetText((name or "Spell").." ("..o.value..")", 1,1,1,true)
+				  end
+				elseif o.kind == "quest" then
+				  local ok = pcall(function() GameTooltip:SetHyperlink("quest:"..o.value) end)
+				  if not ok then
+					local qname = MangosAdminDB.quests and MangosAdminDB.quests[o.value]
+					GameTooltip:SetText((qname or "Quest").." ("..o.value..")", 1,1,1)
+					GameTooltip:AddLine("Tooltipdetails sind hier begrenzt.", 0.9,0.9,0.9)
+					GameTooltip:Show()
+				  end
+				elseif o.kind == "itemset" then
+					GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+					GameTooltip:SetText(o.text or "Itemset", 1, 1, 1)
+
+					if not o.items or #o.items == 0 then
+						-- Fallback: keine Items gefunden
+						GameTooltip:AddLine("Keine Items gefunden", 1, 0, 0)
+					else
+						for _, itemID in ipairs(o.items) do
+							local itemName, _, itemQuality, _, _, _, _, _, _, itemIcon = GetItemInfo(itemID)
+							if itemName then
+								local r, g, b = GetItemQualityColor(itemQuality or 1)
+								GameTooltip:AddLine("|T"..itemIcon..":16|t "..itemName, r, g, b)
+							else
+								-- Item noch nicht im Cache
+								GameTooltip:AddLine("- ItemID "..itemID.." (lädt...)", 0.5, 0.5, 0.5)
+							end
+						end
+					end
+					GameTooltip:Show()
+			  else
+				GameTooltip:SetText(o.text or "", 1, 1, 1, true)
+			  end
+			end)
+
+          b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+          b:SetScript("OnClick", function(self)
+            local o = self.opt
+            selectedValue = o and o.value or nil
+            selectedText  = o and o.text or nil
+            dd:SetText(selectedText or "Auswahl")
+            list:Hide()
+            if onChange and selectedValue then onChange(selectedValue, selectedText) end
+          end)
+        end
+      else
+        b:Hide()
+        b.opt = nil
+        b:SetScript("OnEnter", nil); b:SetScript("OnLeave", nil); b:SetScript("OnClick", nil)
+      end
+    end
+  end
+  scrollFrame.update = RefreshButtons
+
+  local function MA_FauxUpdate(totalItems)
+    local total = (totalItems and totalItems > 0) and totalItems or 1
+    local rows  = VISIBLE_ROWS
+    local step  = ROW_HEIGHT
+
+    local maxScroll = math.max(0, (total - rows) * step)
+    local cur = scrollBar:GetValue() or 0
+    if cur < 0 then cur = 0 end
+    if cur > maxScroll then cur = maxScroll end
+
+    scrollBar:SetMinMaxValues(0, maxScroll)
+    scrollBar:SetValueStep(step)
+    scrollBar:SetValue(cur)
+
+    if cur <= 0 then scrollUpBtn:Disable() else scrollUpBtn:Enable() end
+    if cur >= maxScroll then scrollDownBtn:Disable() else scrollDownBtn:Enable() end
+
+    local offset = math.floor((cur / step) + 0.5)
+    FauxScrollFrame_SetOffset(scrollFrame, offset)
+
+    RefreshButtons()
+  end
+
+	local function ApplyFilter()
+	  local q = (searchBox:GetText() or ""):lower()
+	  filtered = {}
+	  for _, opt in ipairs(opts) do
+		local t = opt.text or ""
+		if q == "" or t:lower():find(q, 1, true) then
+		  table.insert(filtered, opt)
+		end
+	  end
+	  -- Kein automatisches Scroll-Reset mehr!
+	  MA_FauxUpdate(#filtered)
+	end
+
+
+    -- Live filtering while typing
+  searchBox:SetScript("OnTextChanged", function(self, userInput)
+    ApplyFilter()
+  end)
+  searchBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  searchBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+
+  scrollFrame:EnableMouseWheel(true)
+  scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+    local step = ROW_HEIGHT * 3
+    local newVal = (scrollBar:GetValue() or 0) - delta * step
+    local min, max = scrollBar:GetMinMaxValues()
+    if newVal < min then newVal = min end
+    if newVal > max then newVal = max end
+    scrollBar:SetValue(newVal)
+    local offset = math.floor((newVal / ROW_HEIGHT) + 0.5)
+    FauxScrollFrame_SetOffset(scrollFrame, offset)
+    RefreshButtons()
+  end)
+
+  scrollBar:SetScript("OnValueChanged", function(self, value)
+    local offset = math.floor((value / ROW_HEIGHT) + 0.5)
+    FauxScrollFrame_SetOffset(scrollFrame, offset)
+    RefreshButtons()
+  end)
+
+  scrollFrame:SetScript("OnShow", RefreshButtons)
+
+  dd:SetScript("OnClick", function()
+    if list:IsShown() then
+      list:Hide()
+    else
+      list:Show()
+      if list.Raise then list:Raise() end
+      searchBox:SetText("")
+      ApplyFilter()
+      searchBox:SetFocus()
+    end
+  end)
+
+  list:SetScript("OnHide", function() GameTooltip:Hide() end)
+  
+  -- Logisches Schließen bei globalen Events
+  if MangosAdmin_Main then
+    MangosAdmin_Main:HookScript("OnHide", function() list:Hide() end)
+  end
+  if GameMenuFrame then
+    GameMenuFrame:HookScript("OnShow", function() list:Hide() end)
+  end
+  if parent then
+	parent:HookScript("OnHide", function() list:Hide() end)
+  end
+  if UIParent then
+	UIParent:HookScript("OnHide", function() list:Hide() end)
+  end
+
+  if #opts > 0 then
+    selectedValue = opts[1].value
+    selectedText  = opts[1].text
+    dd:SetText(selectedText or "Auswahl")
+  else
+    dd:SetText("Auswahl")
+  end
+  ApplyFilter()
+
+  return {
+    frame = dd,
+    list = list,
+    get = function() return selectedValue, selectedText end,
+    setOptions = function(newOptions)
+      local prev = selectedValue
+      opts = newOptions or {}
+
+      selectedValue, selectedText = nil, nil
+      if prev ~= nil then
+        for _, o in ipairs(opts) do
+          if o.value == prev then
+            selectedValue = o.value
+            selectedText  = o.text
+            break
+          end
+        end
+      end
+      if not selectedValue and #opts > 0 then
+        selectedValue = opts[1].value
+        selectedText  = opts[1].text
+      end
+
+      dd:SetText(selectedText or "Auswahl")
+      ApplyFilter()
+    end
+  }
+end
